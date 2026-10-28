@@ -62,10 +62,10 @@ AI 트렌드는 별도 작업이 담당하므로 이 작업에서는 다루지 �
 
 | 지표 | 1순위 (파일) | 교차검증 / 폴백 |
 |---|---|---|
-| S&P500, NASDAQ, DJIA | `market.yahoo.SP500` 등 | `market.stooq_crosscheck` |
+| S&P500, NASDAQ, DJIA | `market.yahoo.SP500` 등 | `market.fred_crosscheck` (FRED, 1영업일 늦을 수 있음) |
 | KOSPI, KOSDAQ | `market.yahoo.KOSPI`, `KOSDAQ` | WebSearch 국내 기사 1건 |
 | DXY | `market.yahoo.DXY` | WebSearch |
-| 원/달러 | `market.yahoo.USDKRW` (글로벌 호가) | `stooq_crosscheck.USDKRW`, 서울 외환시장 종가 기사 |
+| 원/달러 | `market.yahoo.USDKRW` (글로벌 호가) | `fred_crosscheck.USDKRW`, 서울 외환시장 종가 기사 |
 | 10Y 금리 | `rates.treasury_par_yield` (최신 거래일) | `rates.fred_dgs10` (1영업일 늦음), `market.yahoo.US10Y_YAHOO` |
 | TGA | `tga` (`balance_busd`, `wow_change_busd`, `record_date`) | fiscaldata API 직접 호출 |
 | VIX, WTI, 금, BTC | `market.yahoo` | 필요할 때만 |

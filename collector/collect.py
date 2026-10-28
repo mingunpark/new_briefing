@@ -24,27 +24,30 @@ STATE = DATA / "state"
 KST = timezone(timedelta(hours=9))
 NOW = datetime.now(timezone.utc)
 UA = {"User-Agent": "Mozilla/5.0 (news-briefing-collector; +https://github.com/mingunpark/new_briefing)"}
-TIMEOUT = 25
+TIMEOUT = 20
 
 status: dict[str, dict] = {}
 
 
-def get(url: str, **kw) -> requests.Response:
+def get(url: str, attempts: int = 3, **kw) -> requests.Response:
+    """429/5xx/네트워크 오류만 재시도. 400·403·404 같은 영구 오류는 바로 실패 처리."""
     headers = {**UA, **kw.pop("headers", {})}
     last = None
-    for attempt in range(3):
+    for attempt in range(attempts):
         try:
             r = requests.get(url, headers=headers, timeout=TIMEOUT, **kw)
-            if r.status_code == 429 or r.status_code >= 500:
-                last = f"HTTP {r.status_code}"
-                time.sleep(3 * (attempt + 1))
-                continue
-            r.raise_for_status()
-            return r
-        except requests.RequestException as e:  # noqa: PERF203
+        except requests.RequestException as e:
             last = str(e)
             time.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"GET failed after retries: {url} ({last})")
+            continue
+        if r.status_code == 429 or r.status_code >= 500:
+            last = f"HTTP {r.status_code}"
+            time.sleep(3 * (attempt + 1))
+            continue
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code} (no retry): {url}")
+        return r
+    raise RuntimeError(f"GET failed after {attempts} attempts: {url} ({last})")
 
 
 def run(name: str, fn):
@@ -104,30 +107,25 @@ def market_yahoo() -> dict:
     return out
 
 
-STOOQ = {"SP500": "^spx", "NASDAQ": "^ndq", "DJIA": "^dji", "USDKRW": "usdkrw"}
+FRED_CROSS = {"SP500": "SP500", "NASDAQ": "NASDAQCOM", "DJIA": "DJIA", "USDKRW": "DEXKOUS"}
 
 
-def market_stooq() -> dict:
-    """교차검증용 2차 소스."""
+def market_fred_crosscheck() -> dict:
+    """교차검증용 2차 소스 (FRED 지수·환율 시계열, 1영업일 늦게 게시될 수 있음)."""
     out = {}
-    for key, sym in STOOQ.items():
+    for key, series in FRED_CROSS.items():
         try:
-            r = get(f"https://stooq.com/q/d/l/?s={sym}&i=d")
-            rows = [row for row in csv.DictReader(io.StringIO(r.text)) if row.get("Close")]
-            if len(rows) < 2:
-                raise ValueError("insufficient rows")
-            last, prev = rows[-1], rows[-2]
-            close, pclose = float(last["Close"]), float(prev["Close"])
+            f = fred(series)
             out[key] = {
-                "close": close,
-                "change_pct": round((close / pclose - 1) * 100, 3),
-                "as_of": last["Date"],
-                "source": f"stooq {sym}",
+                "close": f["value"],
+                "change_pct": round((f["value"] / f["prev_value"] - 1) * 100, 3),
+                "as_of": f["as_of"],
+                "source": f"FRED {series}",
             }
         except Exception as e:  # noqa: BLE001
             out[key] = {"error": f"{type(e).__name__}: {e}"[:200]}
     if all("error" in v for v in out.values()):
-        raise RuntimeError("all stooq symbols failed")
+        raise RuntimeError("all FRED crosscheck series failed")
     return out
 
 
@@ -276,6 +274,8 @@ def github_new_repos() -> list:
             "repo": it["full_name"],
             "description": it.get("description"),
             "stars_total": it["stargazers_count"],
+            "forks": it.get("forks_count"),
+            "open_issues": it.get("open_issues_count"),
             "created_at": it["created_at"],
             "language": it.get("language"),
             "license": (it.get("license") or {}).get("spdx_id"),
@@ -326,7 +326,7 @@ def reddit() -> dict:
     out = {}
     for s in subs:
         try:
-            d = get(f"https://www.reddit.com/r/{s}/top.json?t=day&limit=10", headers={"Accept": "application/json"}).json()
+            d = get(f"https://www.reddit.com/r/{s}/top.json?t=day&limit=10", attempts=1, headers={"Accept": "application/json"}).json()
             out[s] = [
                 {
                     "title": c["data"]["title"],
@@ -346,7 +346,7 @@ def reddit() -> dict:
 def hf_trending() -> dict:
     out = {}
     for t in ("model", "dataset", "space"):
-        items = get(f"https://huggingface.co/api/trending?type={t}&limit=30").json().get("recentlyTrending", [])
+        items = get(f"https://huggingface.co/api/trending?type={t}").json().get("recentlyTrending", [])
         rows = []
         for it in items:
             d = it.get("repoData", {})
@@ -364,7 +364,7 @@ def hf_trending() -> dict:
                     "ai_category": d.get("ai_category"),
                 }
             )
-        out[t] = rows
+        out[t] = rows[:30]
     return out
 
 
@@ -397,10 +397,12 @@ def main():
             "tga": "단위 busd=십억 달러. record_date 는 DTS 기준일(T+1 영업일 게시).",
             "fred_dgs10": "FRED 는 1영업일 늦게 게시되므로 최신 거래일 값은 treasury_par_yield 를 우선 사용.",
             "usdkrw": "Yahoo KRW=X 는 글로벌 호가 기준이며 서울 외환시장 종가와 다를 수 있음.",
+            "fake_stars": "star 대비 forks 가 극단적으로 적으면(예: 1% 미만) star 조작 가능성 의심.",
+            "intraday": "as_of 가 오늘(KST) 날짜인 국내·환율 값은 장중 값일 수 있음.",
         },
         "market": {
             "yahoo": run("market_yahoo", market_yahoo),
-            "stooq_crosscheck": run("market_stooq", market_stooq),
+            "fred_crosscheck": run("market_fred_crosscheck", market_fred_crosscheck),
         },
         "rates": {
             "treasury_par_yield": run("treasury_par_yield", treasury_par_yield),
